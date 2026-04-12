@@ -1,32 +1,38 @@
-// Neuron AI — /api/image — DALL-E 3
+// Neuron AI — /api/image v9 — DALL-E 3 with key rotation
 const https = require("https");
 
-function httpPost(urlStr, body, headers) {
+function getOpenAIKeys() {
+  const keys = [];
+  if (process.env.OPENAI_KEY && process.env.OPENAI_KEY.length > 10) keys.push(process.env.OPENAI_KEY);
+  for (let i = 1; i <= 15; i++) {
+    const k = process.env[`OPENAI_KEY_${i}`];
+    if (k && k.length > 10 && !keys.includes(k)) keys.push(k);
+  }
+  return keys;
+}
+
+let imgKeyIndex = 0;
+function getNextKey(keys) {
+  if (!keys.length) return null;
+  imgKeyIndex = imgKeyIndex % keys.length;
+  return keys[imgKeyIndex++];
+}
+
+function httpPost(url, body, headers) {
   return new Promise((resolve, reject) => {
-    const url = new URL(urlStr);
-    const data = JSON.stringify(body);
-    const options = {
-      hostname: url.hostname,
-      path: url.pathname + url.search,
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(data),
-        ...headers
-      }
-    };
-    const req = https.request(options, (res) => {
+    const u = new URL(url);
+    const d = JSON.stringify(body);
+    const req = https.request({
+      hostname: u.hostname, path: u.pathname + u.search, method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(d), ...headers }
+    }, res => {
       let raw = "";
-      res.on("data", chunk => raw += chunk);
-      res.on("end", () => {
-        try { resolve({ status: res.statusCode, data: JSON.parse(raw) }); }
-        catch { resolve({ status: res.statusCode, data: raw }); }
-      });
+      res.on("data", c => raw += c);
+      res.on("end", () => { try { resolve({ status: res.statusCode, data: JSON.parse(raw) }); } catch { resolve({ status: res.statusCode, data: raw }); } });
     });
     req.on("error", reject);
-    req.setTimeout(55000, () => { req.destroy(new Error("Timeout")); });
-    req.write(data);
-    req.end();
+    req.setTimeout(55000, () => req.destroy(new Error("Timeout")));
+    req.write(d); req.end();
   });
 }
 
@@ -34,7 +40,6 @@ module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
@@ -43,33 +48,37 @@ module.exports = async function handler(req, res) {
   const size = body.size || "1024x1024";
   const quality = body.quality || "standard";
 
-  if (!prompt) {
-    return res.status(400).json({ error: "No prompt provided", received: JSON.stringify(body).slice(0, 100) });
-  }
+  if (!prompt) return res.status(400).json({ error: "No prompt provided" });
 
-  const apiKey = process.env.OPENAI_KEY;
-  if (!apiKey || apiKey.length < 10) {
-    return res.status(500).json({ error: "OpenAI key not configured" });
-  }
+  const keys = getOpenAIKeys();
+  if (!keys.length) return res.status(500).json({ error: "No OpenAI keys configured" });
 
-  try {
-    const result = await httpPost(
-      "https://api.openai.com/v1/images/generations",
-      { model: "dall-e-3", prompt, n: 1, size, quality, response_format: "url" },
-      { Authorization: "Bearer " + apiKey }
-    );
+  let lastErr = null;
 
-    if (result.status !== 200) {
-      const errMsg = result.data?.error?.message || JSON.stringify(result.data).slice(0, 200);
-      return res.status(502).json({ error: "DALL-E failed: " + errMsg });
+  for (let attempt = 0; attempt < keys.length; attempt++) {
+    const key = getNextKey(keys);
+    if (!key) break;
+    try {
+      const r = await httpPost(
+        "https://api.openai.com/v1/images/generations",
+        { model: "dall-e-3", prompt, n: 1, size, quality, response_format: "url" },
+        { Authorization: "Bearer " + key }
+      );
+      if (r.status === 200) {
+        const imageUrl = r.data?.data?.[0]?.url;
+        const revisedPrompt = r.data?.data?.[0]?.revised_prompt;
+        if (imageUrl) return res.status(200).json({ imageUrl, revisedPrompt });
+        throw new Error("No image URL returned");
+      }
+      const errMsg = (r.data?.error?.message || JSON.stringify(r.data)).slice(0, 200);
+      console.error(`Image key ${attempt + 1} HTTP ${r.status}:`, errMsg);
+      lastErr = new Error(errMsg);
+      if (r.status === 400) break; // content policy, no retry
+    } catch (e) {
+      console.error(`Image key ${attempt + 1} error:`, e.message);
+      lastErr = e;
     }
-
-    const imageUrl = result.data?.data?.[0]?.url;
-    const revisedPrompt = result.data?.data?.[0]?.revised_prompt;
-    if (!imageUrl) return res.status(502).json({ error: "No image URL in DALL-E response" });
-
-    return res.status(200).json({ imageUrl, revisedPrompt });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
   }
+
+  return res.status(502).json({ error: lastErr?.message || "Image generation failed", keysAttempted: keys.length });
 };
