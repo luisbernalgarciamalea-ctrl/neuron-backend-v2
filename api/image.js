@@ -1,7 +1,5 @@
 // Neuron AI — /api/image
-// Uses Gemini image generation — completely FREE, 500 images/day per key
-// Model: gemini-2.0-flash-preview-image-generation
-// Same GEMINI_KEY as chat — no extra keys needed
+// Gemini image generation with model fallback chain
 const https = require("https");
 
 function getGeminiKeys() {
@@ -17,33 +15,32 @@ function getGeminiKeys() {
 
 let kidx = 0;
 function nextKey(keys) {
-  if (!keys.length) return null;
-  const k = keys[kidx % keys.length];
-  kidx++;
-  return k;
+  const k = keys[kidx % keys.length]; kidx++; return k;
 }
+
+// Try models in order — first one that works wins
+const IMAGE_MODELS = [
+  "gemini-2.5-flash-image-preview",
+  "gemini-3.1-flash-image-preview",
+  "gemini-2.5-flash-image",
+  "gemini-2.0-flash-exp",
+];
 
 function httpPost(url, body) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const d = JSON.stringify(body);
     const req = https.request({
-      hostname: u.hostname,
-      path: u.pathname + u.search,
-      method: "POST",
+      hostname: u.hostname, path: u.pathname + u.search, method: "POST",
       headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(d) }
     }, res => {
       let raw = "";
       res.on("data", c => raw += c);
-      res.on("end", () => {
-        try { resolve({ status: res.statusCode, data: JSON.parse(raw) }); }
-        catch { resolve({ status: res.statusCode, data: raw }); }
-      });
+      res.on("end", () => { try { resolve({ status: res.statusCode, data: JSON.parse(raw) }); } catch { resolve({ status: res.statusCode, data: raw }); } });
     });
     req.on("error", reject);
     req.setTimeout(60000, () => req.destroy(new Error("Timeout")));
-    req.write(d);
-    req.end();
+    req.write(d); req.end();
   });
 }
 
@@ -63,44 +60,36 @@ module.exports = async function handler(req, res) {
 
   let lastErr = null;
 
-  for (let i = 0; i < keys.length; i++) {
+  for (let ki = 0; ki < keys.length; ki++) {
     const key = nextKey(keys);
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-preview-image-generation:generateContent?key=${key}`;
-      const r = await httpPost(url, {
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { responseModalities: ["TEXT", "IMAGE"] }
-      });
+    for (const model of IMAGE_MODELS) {
+      try {
+        const r = await httpPost(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
+          { contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseModalities: ["TEXT", "IMAGE"] } }
+        );
 
-      if (r.status === 200) {
-        const parts = r.data?.candidates?.[0]?.content?.parts || [];
-
-        // Find the image part (inlineData with base64)
-        const imgPart = parts.find(p => p.inlineData?.mimeType?.startsWith("image/"));
-        if (imgPart) {
-          const base64 = imgPart.inlineData.data;
-          const mimeType = imgPart.inlineData.mimeType;
-          // Return as data URL so frontend can display directly
-          const dataUrl = `data:${mimeType};base64,${base64}`;
-          return res.status(200).json({ imageUrl: dataUrl, isDataUrl: true });
+        if (r.status === 200) {
+          const parts = r.data?.candidates?.[0]?.content?.parts || [];
+          const imgPart = parts.find(p => p.inlineData?.mimeType?.startsWith("image/"));
+          if (imgPart) {
+            const dataUrl = `data:${imgPart.inlineData.mimeType};base64,${imgPart.inlineData.data}`;
+            return res.status(200).json({ imageUrl: dataUrl, isDataUrl: true, model });
+          }
+          lastErr = new Error(`${model}: no image in response`);
+          continue;
         }
-
-        throw new Error("No image in Gemini response");
-      }
-
-      const errMsg = (r.data?.error?.message || JSON.stringify(r.data)).slice(0, 200);
-      console.error(`Image key ${i+1} HTTP ${r.status}:`, errMsg);
-      lastErr = new Error(errMsg);
-      if (r.status === 400) break;
-
-    } catch (e) {
-      console.error(`Image key ${i+1} error:`, e.message);
-      lastErr = e;
+        if (r.status === 404 || r.status === 403) { lastErr = new Error(`${model}: HTTP ${r.status}`); continue; }
+        if (r.status === 429) { lastErr = new Error("Rate limit"); break; }
+        const msg = (r.data?.error?.message || JSON.stringify(r.data)).slice(0, 150);
+        lastErr = new Error(`${model} HTTP ${r.status}: ${msg}`);
+      } catch (e) { lastErr = e; }
     }
   }
 
   return res.status(502).json({
-    error: lastErr?.message || "Image generation failed",
-    keysAttempted: keys.length
+    error: lastErr?.message || "All image models failed",
+    tried: IMAGE_MODELS,
+    hint: "Gemini image generation may require billing enabled at aistudio.google.com for some models"
   });
 };
