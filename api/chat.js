@@ -116,8 +116,11 @@ module.exports = async function handler(req, res) {
   const system = getSystemPrompt(mode, language, searchResults, isCreator);
   const maxTok = plan === "Premium" ? 8192 : plan === "Pro" ? 4096 : 2048;
 
-  // Premium gets Gemini 2.5 Pro, Free/Pro gets Gemini 2.5 Flash
-  const model = plan === "Premium" ? "gemini-2.5-pro-preview-03-25" : "gemini-2.5-flash";
+  // Premium gets best available model, Free/Pro gets Flash
+  // Fallback chain in case a model isn't available in the region
+  const premiumModels = ["gemini-2.5-pro-preview", "gemini-2.0-pro-exp", "gemini-2.5-flash"];
+  const freeModels    = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"];
+  const modelList = plan === "Premium" ? premiumModels : freeModels;
 
   // Convert messages to Gemini format
   const contents = [];
@@ -141,33 +144,42 @@ module.exports = async function handler(req, res) {
   for (let i = 0; i < keys.length; i++) {
     const key = nextKey(keys);
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
-      const r = await httpPost(url, {
-        system_instruction: { parts: [{ text: system }] },
-        contents,
-        generationConfig: {
-          maxOutputTokens: maxTok,
-          temperature: 0.7
-        }
-      });
+      // Try each model in the list for this key
+      let keySucceeded = false;
+      for (const model of modelList) {
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+          const r = await httpPost(url, {
+            system_instruction: { parts: [{ text: system }] },
+            contents,
+            generationConfig: { maxOutputTokens: maxTok, temperature: 0.7 }
+          });
 
-      if (r.status === 200) {
-        const text = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (text) {
-          return res.status(200).json({ reply: text, content: text, provider: `gemini-${model}` });
+          if (r.status === 200) {
+            const text = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (text) {
+              return res.status(200).json({ reply: text, content: text, provider: `gemini-${model}` });
+            }
+            const reason = r.data?.candidates?.[0]?.finishReason;
+            if (reason === "SAFETY") throw new Error("Content blocked by safety filter");
+            throw new Error("Empty response");
+          }
+
+          const errMsg = (r.data?.error?.message || JSON.stringify(r.data)).slice(0, 150);
+          // 404 = model not found, try next model
+          if (r.status === 404) { console.warn(`Model ${model} not found, trying next`); continue; }
+          // 429 = rate limit, break to next key
+          if (r.status === 429) { lastErr = new Error(`HTTP 429: ${errMsg}`); keySucceeded = false; break; }
+          // 400 = bad request
+          if (r.status === 400) throw new Error(`HTTP 400: ${errMsg}`);
+          lastErr = new Error(`HTTP ${r.status}: ${errMsg}`);
+        } catch(modelErr) {
+          if (modelErr.message.includes("429")) { lastErr = modelErr; break; }
+          lastErr = modelErr;
+          // continue to next model
         }
-        const reason = r.data?.candidates?.[0]?.finishReason;
-        if (reason === "SAFETY") throw new Error("Content blocked by safety filter — try rephrasing");
-        throw new Error("Empty response from Gemini");
       }
-
-      const errMsg = (r.data?.error?.message || JSON.stringify(r.data)).slice(0, 200);
-      console.error(`Gemini key ${i+1} HTTP ${r.status}:`, errMsg);
-      lastErr = new Error(`HTTP ${r.status}: ${errMsg}`);
-
-      // 429 = rate limit on this key, try next
-      // 400 = bad request, no point retrying
-      if (r.status === 400) break;
+      if (keySucceeded) break;
 
     } catch (e) {
       console.error(`Gemini key ${i+1} error:`, e.message);
