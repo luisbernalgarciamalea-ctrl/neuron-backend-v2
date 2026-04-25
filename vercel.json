@@ -1,8 +1,9 @@
 {
   "version": 2,
   "functions": {
-    "api/chat.js":   { "maxDuration": 30 },
+    "api/chat.js":   { "maxDuration": 60 },
     "api/image.js":  { "maxDuration": 60 },
+    "api/music.js":  { "maxDuration": 60 },
     "api/search.js": { "maxDuration": 10 }
   }
 }
