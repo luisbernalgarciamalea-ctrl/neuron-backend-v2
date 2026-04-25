@@ -46,7 +46,7 @@ function getSystemPrompt(mode, language, searchResults, isCreator) {
     chat:         `${base}\nBe sharp, warm, direct. Use markdown. Never pad.${src}`,
     research:     `${base}\nResearch mode. **Executive Summary** → sections → **Key Facts** → Sources [N]. Thorough.${src}`,
     docs:         `${base}\nDocs mode. Polished professional documents. Clear structure and precise language.`,
-    code:         `${base}\nCode mode — senior engineer. Clean production code with error handling. For web: complete HTML+CSS+JS in ONE file. Return code then ## How it works.`,
+    code:         `${base}\nCode mode — senior engineer. Rules:\n1. Write complete working code in ONE file (HTML+CSS+JS all together)\n2. Be CONCISE — clean readable code, not bloated\n3. For e-commerce/websites: include working UI, CSS styling, JavaScript functionality\n4. Return ONLY the code — no explanations before it\n5. After the code add a brief ## How to use section`,
     math:         `${base}\nMaths. Steps: **Understand → Plan → Solve (show every step) → Check → Final Answer**. Clear notation.`,
     author:       `${base}\nBook Writer. Pure immersive prose only. No headings. Vivid detail, real emotion. Stop mid-sentence if needed.`,
     script:       `${base}\nScript Writer. SCREENPLAY (INT./EXT., CAPS names), YOUTUBE ([TIMESTAMP],[B-ROLL:]), PODCAST (HOST/GUEST). Default: YouTube. Production-ready.`,
@@ -58,7 +58,8 @@ function getSystemPrompt(mode, language, searchResults, isCreator) {
     logo:         `${base}\nLogo Designer. 2-3 distinct concepts. Each:\n## Concept [N]: [Name]\n**Tagline/Symbol/Colors(hex)/Typography/AI Image Prompt:**`,
     presentation: `${base}\nPresentation. Each slide:\n---\n## SLIDE [N]: TITLE\n**Layout/Key Content/Visual Element/Speaker Notes:**\n---`,
     business:     `${base}\nBusiness Consultant. **Situation → Options → Recommendation → Steps → Risks → Next Actions**. Concrete and specific.`,
-    support:      `${base}\nSupport. Empathetic, solution-focused, warm, complete resolution.`
+    support:      `${base}\nSupport. Empathetic, solution-focused, warm, complete resolution.`,
+    songwriter:   `${base}\nSong Writer mode. Write complete, professional song lyrics with clear structure labels: [Verse 1], [Pre-Chorus], [Chorus], [Verse 2], [Bridge], [Final Chorus], [Outro]. Match the genre's style, rhyme scheme, and rhythm precisely. Make the chorus memorable with a strong hook. Make it emotionally resonant and authentic.`
   };
   return p[mode] || p.chat;
 }
@@ -81,7 +82,7 @@ function httpPost(url, body) {
       });
     });
     req.on("error", reject);
-    req.setTimeout(30000, () => req.destroy(new Error("Timeout")));
+    req.setTimeout(55000, () => req.destroy(new Error("Timeout after 55s")));
     req.write(d);
     req.end();
   });
@@ -114,7 +115,10 @@ module.exports = async function handler(req, res) {
 
   const isCreator = userEmail.toLowerCase() === CREATOR_EMAIL.toLowerCase();
   const system = getSystemPrompt(mode, language, searchResults, isCreator);
-  const maxTok = plan === "Premium" ? 8192 : plan === "Pro" ? 4096 : 2048;
+  // Code needs enough tokens but not too many (causes timeout)
+  // Other modes get full allocation
+  const baseTok = plan === "Premium" ? 8192 : plan === "Pro" ? 4096 : 2048;
+  const maxTok = mode === "code" ? Math.min(baseTok, 4096) : baseTok;
 
   // Premium gets best available model, Free/Pro gets Flash
   // Fallback chain in case a model isn't available in the region
