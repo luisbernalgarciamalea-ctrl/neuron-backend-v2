@@ -1,41 +1,32 @@
 // Neuron AI — /api/music
-// Uses Hugging Face free Inference API + Meta MusicGen
-// Get free token at huggingface.co → Settings → Access Tokens (no credit card)
+// ElevenLabs Eleven Music API — free tier: 11 min/month
+// Get free key: elevenlabs.io → Profile → API Keys
+// Add as ELEVENLABS_KEY in Vercel environment variables
 const https = require("https");
 
-function httpRequest(url, method, body, headers) {
+function httpPost(url, body, headers) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
-    const d = body ? JSON.stringify(body) : null;
+    const d = JSON.stringify(body);
     const req = https.request({
-      hostname: u.hostname,
-      path: u.pathname + u.search,
-      method,
-      headers: {
-        "Content-Type": "application/json",
-        ...(d ? { "Content-Length": Buffer.byteLength(d) } : {}),
-        ...headers
-      }
+      hostname: u.hostname, path: u.pathname + u.search, method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(d), ...headers }
     }, res => {
       const chunks = [];
       res.on("data", c => chunks.push(c));
       res.on("end", () => {
         const raw = Buffer.concat(chunks);
-        // Try JSON first, otherwise return raw buffer (audio bytes)
-        try {
-          const json = JSON.parse(raw.toString());
-          resolve({ status: res.statusCode, data: json, isJson: true });
-        } catch {
-          resolve({ status: res.statusCode, data: raw, isJson: false });
-        }
+        try { resolve({ status: res.statusCode, data: JSON.parse(raw.toString()), isJson: true, raw }); }
+        catch { resolve({ status: res.statusCode, data: raw, isJson: false, raw }); }
       });
     });
     req.on("error", reject);
-    req.setTimeout(60000, () => req.destroy(new Error("Timeout")));
-    if (d) req.write(d);
-    req.end();
+    req.setTimeout(120000, () => req.destroy(new Error("Timeout — ElevenLabs music can take up to 2 minutes")));
+    req.write(d); req.end();
   });
 }
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -46,65 +37,90 @@ module.exports = async function handler(req, res) {
 
   const body = req.body || {};
   const prompt = (body.prompt || "").trim();
-  const duration = Math.min(parseInt(body.duration) || 10, 30); // max 30s
+  const lyrics = (body.lyrics || "").trim();
+  const durationMs = Math.min(parseInt(body.durationMs) || 30000, 120000);
 
   if (!prompt) return res.status(400).json({ error: "No prompt provided" });
 
-  const hfToken = process.env.HF_TOKEN;
-  if (!hfToken) {
+  const key = process.env.ELEVENLABS_KEY;
+  if (!key) {
     return res.status(500).json({
-      error: "No Hugging Face token configured",
-      fix: "Go to huggingface.co → Settings → Access Tokens → New token (free) → Add as HF_TOKEN in Vercel env vars"
+      error: "No ElevenLabs key configured",
+      fix: "Get a free key at elevenlabs.io → Profile → API Keys → Add as ELEVENLABS_KEY in Vercel"
     });
   }
 
-  // Try models in order — small is fastest and most reliable on free tier
-  const models = [
-    "facebook/musicgen-small",
-    "facebook/musicgen-medium"
-  ];
+  try {
+    // Step 1: Create composition plan (free, no credits used)
+    const planRes = await httpPost(
+      "https://api.elevenlabs.io/v1/music/composition-plans",
+      {
+        prompt: lyrics ? `${prompt}. Lyrics: ${lyrics}` : prompt,
+        duration_ms: durationMs
+      },
+      { "xi-api-key": key }
+    );
 
-  for (const model of models) {
-    try {
-      const r = await httpRequest(
-        `https://api-inference.huggingface.co/models/${model}`,
-        "POST",
-        {
-          inputs: prompt,
-          parameters: { max_new_tokens: duration * 50 } // ~50 tokens per second
-        },
-        {
-          Authorization: "Bearer " + hfToken,
-          "x-wait-for-model": "true" // wait if model is loading (cold start)
-        }
-      );
-
-      if (r.status === 200 && !r.isJson) {
-        // Got raw audio bytes — convert to base64 and return
-        const base64 = r.data.toString("base64");
-        return res.status(200).json({
-          audio: base64,
-          mimeType: "audio/wav",
-          model
-        });
-      }
-
-      if (r.status === 503) {
-        // Model loading — try next
-        console.warn(`${model} loading, trying next`);
-        continue;
-      }
-
-      const errMsg = r.isJson ? (r.data?.error || JSON.stringify(r.data)) : "Unknown error";
-      console.error(`${model} HTTP ${r.status}:`, errMsg);
-
-    } catch (e) {
-      console.error(`${model} error:`, e.message);
+    if (planRes.status !== 200 && planRes.status !== 201) {
+      const msg = planRes.isJson ? (planRes.data?.detail || JSON.stringify(planRes.data)) : planRes.status;
+      throw new Error("Plan creation failed: " + msg);
     }
-  }
 
-  return res.status(502).json({
-    error: "Music generation failed — models may be loading. Please try again in 30 seconds.",
-    hint: "HF free tier cold-starts can take up to 60 seconds. First request is always slowest."
-  });
+    const plan = planRes.data;
+
+    // Step 2: Compose music using the plan
+    const composeRes = await httpPost(
+      "https://api.elevenlabs.io/v1/music/compose",
+      {
+        composition_plan: plan,
+        output_format: "mp3_44100_128"
+      },
+      { "xi-api-key": key }
+    );
+
+    if (composeRes.status === 200 && !composeRes.isJson) {
+      // Got audio bytes directly
+      const base64 = composeRes.raw.toString("base64");
+      return res.status(200).json({ audio: base64, mimeType: "audio/mpeg", provider: "elevenlabs" });
+    }
+
+    if (composeRes.status === 200 && composeRes.isJson) {
+      // May be a job ID (async)
+      const jobId = composeRes.data?.id || composeRes.data?.job_id;
+      if (!jobId) {
+        // Try direct audio URL
+        if (composeRes.data?.audio_url) {
+          return res.status(200).json({ audioUrl: composeRes.data.audio_url, provider: "elevenlabs" });
+        }
+        throw new Error("No audio or job ID in response: " + JSON.stringify(composeRes.data).slice(0, 200));
+      }
+
+      // Poll for completion
+      for (let attempt = 0; attempt < 12; attempt++) {
+        await sleep(5000);
+        const pollRes = await httpPost(
+          `https://api.elevenlabs.io/v1/music/${jobId}`,
+          {},
+          { "xi-api-key": key }
+        );
+        if (pollRes.isJson && pollRes.data?.status === "complete") {
+          const url = pollRes.data?.audio_url || pollRes.data?.url;
+          if (url) return res.status(200).json({ audioUrl: url, provider: "elevenlabs" });
+        }
+        if (pollRes.isJson && pollRes.data?.status === "error") {
+          throw new Error("Generation failed: " + (pollRes.data?.error || "unknown"));
+        }
+      }
+      throw new Error("Timed out waiting for ElevenLabs — try again");
+    }
+
+    const errMsg = composeRes.isJson
+      ? (composeRes.data?.detail?.message || composeRes.data?.detail || JSON.stringify(composeRes.data))
+      : composeRes.status;
+    throw new Error("Compose failed: " + errMsg);
+
+  } catch (e) {
+    console.error("Music error:", e.message);
+    return res.status(502).json({ error: e.message });
+  }
 };
