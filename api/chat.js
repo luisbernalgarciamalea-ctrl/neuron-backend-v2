@@ -120,11 +120,26 @@ module.exports = async function handler(req, res) {
   const baseTok = plan === "Premium" ? 8192 : plan === "Pro" ? 4096 : 2048;
   const maxTok = mode === "code" ? Math.min(baseTok, 4096) : baseTok;
 
-  // Premium gets best available model, Free/Pro gets Flash
-  // Fallback chain in case a model isn't available in the region
-  const premiumModels = ["gemini-2.5-pro-preview", "gemini-2.0-pro-exp", "gemini-2.5-flash"];
-  const freeModels    = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"];
-  const modelList = plan === "Premium" ? premiumModels : freeModels;
+  // User can request a specific model, otherwise use plan-based default
+  const ALLOWED_MODELS = {
+    "gemini-2.5-pro-preview":  true,
+    "gemini-2.5-flash":        true,
+    "gemini-2.0-flash":        true,
+    "gemini-1.5-pro":          true,
+    "gemini-2.0-pro-exp":      true,
+  };
+  const requestedModel = body.payload?.model || body.model || null;
+  let modelList;
+  if (requestedModel && ALLOWED_MODELS[requestedModel]) {
+    // User chose a specific model — try it first, then fallback
+    const allFallbacks = ["gemini-2.5-flash","gemini-2.0-flash","gemini-1.5-pro"];
+    modelList = [requestedModel, ...allFallbacks.filter(m => m !== requestedModel)];
+  } else {
+    // Plan-based defaults
+    modelList = plan === "Premium"
+      ? ["gemini-2.5-pro-preview","gemini-2.0-pro-exp","gemini-2.5-flash"]
+      : ["gemini-2.5-flash","gemini-2.0-flash","gemini-1.5-pro"];
+  }
 
   // Convert messages to Gemini format
   const contents = [];
@@ -162,7 +177,7 @@ module.exports = async function handler(req, res) {
           if (r.status === 200) {
             const text = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
             if (text) {
-              return res.status(200).json({ reply: text, content: text, provider: `gemini-${model}` });
+              return res.status(200).json({ reply: text, content: text, provider: `gemini-${model}`, model });
             }
             const reason = r.data?.candidates?.[0]?.finishReason;
             if (reason === "SAFETY") throw new Error("Content blocked by safety filter");
