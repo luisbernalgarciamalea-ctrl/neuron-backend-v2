@@ -3,6 +3,7 @@
 // Get free key: json2video.com → Sign up → Dashboard → API Key
 // Add as JSON2VIDEO_KEY in Vercel environment variables
 const https = require("https");
+const { applyCors, handleOptions, cleanText } = require("./_security.js");
 
 function httpReq(url, method, body, headers) {
   return new Promise((resolve, reject) => {
@@ -26,15 +27,13 @@ function httpReq(url, method, body, headers) {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 module.exports = async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.status(200).end();
+  applyCors(req, res, "POST, OPTIONS");
+  if (handleOptions(req, res)) return;
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   const body = req.body || {};
-  const storyboard = (body.storyboard || "").trim();
-  const title = (body.title || "Neuron AI Video").trim();
+  const storyboard = cleanText(body.storyboard, 24000);
+  const title = cleanText(body.title, 200) || "Neuron AI Video";
 
   if (!storyboard) return res.status(400).json({ error: "No storyboard provided" });
 

@@ -1,6 +1,7 @@
 // Neuron AI — /api/auth — Global user accounts via MongoDB
 const https = require("https");
 const crypto = require("crypto");
+const { applyCors, handleOptions } = require("./_security.js");
 
 // Simple MongoDB REST via Data API (no driver needed in serverless)
 // Uses MongoDB Atlas Data API
@@ -72,11 +73,8 @@ async function getCollection() {
 }
 
 module.exports = async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  if (req.method === "OPTIONS") return res.status(200).end();
+  applyCors(req, res, "POST, OPTIONS");
+  if (handleOptions(req, res)) return;
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   const { action, name, email, password, plan } = req.body || {};

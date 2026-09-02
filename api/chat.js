@@ -2,8 +2,10 @@
 // 100% Google Gemini — free, no credit card needed
 // Get keys at aistudio.google.com — add up to 15: GEMINI_KEY, GEMINI_KEY_1 … GEMINI_KEY_15
 const https = require("https");
+const { applyCors, handleOptions, cleanText, cleanHistory, cleanSearchResults } = require("./_security.js");
 
-const CREATOR_EMAIL = "luis.bernaliswestpfalz.de@gmail.com";
+// Keep identity configuration server-side. Never hard-code personal emails in the frontend.
+const CREATOR_EMAIL = String(process.env.CREATOR_EMAIL || "").trim().toLowerCase();
 
 function getGeminiKeys() {
   const keys = [];
@@ -89,31 +91,34 @@ function httpPost(url, body) {
 }
 
 module.exports = async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.status(200).end();
+  applyCors(req, res, "POST, OPTIONS");
+  if (handleOptions(req, res)) return;
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   const body = req.body || {};
   let mode, plan, language, msgs, searchResults, userEmail;
 
   if (body.payload) {
-    mode = body.mode || "chat"; plan = body.payload.plan || "Free";
-    language = body.payload.language || "auto"; searchResults = body.payload.searchResults || [];
-    userEmail = body.payload.userEmail || "";
-    const hist = (body.payload.history || []).slice(-30);
-    const msg = body.payload.message || "";
-    msgs = [...hist.map(h => ({ role: h.role, content: h.content })), { role: "user", content: msg }];
+    mode = cleanText(body.mode, 40) || "chat";
+    plan = cleanText(body.payload.plan, 20) || "Free";
+    language = cleanText(body.payload.language, 80) || "auto";
+    searchResults = cleanSearchResults(body.payload.searchResults);
+    userEmail = cleanText(body.payload.userEmail, 320).toLowerCase();
+    const hist = cleanHistory(body.payload.history);
+    const msg = cleanText(body.payload.message, 24000);
+    msgs = [...hist, ...(msg ? [{ role: "user", content: msg }] : [])];
   } else {
-    mode = body.mode || "chat"; plan = body.plan || "Free";
-    language = body.language || "auto"; searchResults = body.searchResults || [];
-    userEmail = body.userEmail || ""; msgs = body.messages || [];
+    mode = cleanText(body.mode, 40) || "chat";
+    plan = cleanText(body.plan, 20) || "Free";
+    language = cleanText(body.language, 80) || "auto";
+    searchResults = cleanSearchResults(body.searchResults);
+    userEmail = cleanText(body.userEmail, 320).toLowerCase();
+    msgs = cleanHistory(body.messages);
   }
 
   if (!msgs.length) return res.status(400).json({ error: "No message provided" });
 
-  const isCreator = userEmail.toLowerCase() === CREATOR_EMAIL.toLowerCase();
+  const isCreator = Boolean(CREATOR_EMAIL) && userEmail.toLowerCase() === CREATOR_EMAIL;
   const system = getSystemPrompt(mode, language, searchResults, isCreator);
   // Code needs enough tokens but not too many (causes timeout)
   // Other modes get full allocation
@@ -122,23 +127,20 @@ module.exports = async function handler(req, res) {
 
   // User can request a specific model, otherwise use plan-based default
   const ALLOWED_MODELS = {
-    "gemini-2.5-pro-preview":  true,
-    "gemini-2.5-flash":        true,
-    "gemini-2.0-flash":        true,
-    "gemini-1.5-pro":          true,
-    "gemini-2.0-pro-exp":      true,
+    "gemini-2.5-pro-preview": true,
+    "gemini-2.5-flash": true,
   };
   const requestedModel = body.payload?.model || body.model || null;
   let modelList;
   if (requestedModel && ALLOWED_MODELS[requestedModel]) {
     // User chose a specific model — try it first, then fallback
-    const allFallbacks = ["gemini-2.5-flash","gemini-2.0-flash","gemini-1.5-pro"];
+    const allFallbacks = ["gemini-2.5-flash"];
     modelList = [requestedModel, ...allFallbacks.filter(m => m !== requestedModel)];
   } else {
     // Plan-based defaults
     modelList = plan === "Premium"
-      ? ["gemini-2.5-pro-preview","gemini-2.0-pro-exp","gemini-2.5-flash"]
-      : ["gemini-2.5-flash","gemini-2.0-flash","gemini-1.5-pro"];
+      ? ["gemini-2.5-pro-preview","gemini-2.5-flash"]
+      : ["gemini-2.5-flash"];
   }
 
   // Convert messages to Gemini format

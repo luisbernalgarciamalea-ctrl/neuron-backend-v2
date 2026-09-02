@@ -1,6 +1,7 @@
 // Neuron AI — /api/search
 // Uses Serper.dev (Google) if SERPER_KEY is set, otherwise DuckDuckGo (free, no key)
 const https = require("https");
+const { applyCors, handleOptions, cleanText } = require("./_security.js");
 
 function httpGet(urlStr) {
   return new Promise((resolve, reject) => {
@@ -34,12 +35,10 @@ function httpPost(urlStr, body, headers) {
 }
 
 module.exports = async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.status(200).end();
+  applyCors(req, res, "GET, POST, OPTIONS");
+  if (handleOptions(req, res)) return;
 
-  const q = req.query?.q || req.body?.q || "";
+  const q = cleanText(req.query?.q || req.body?.q, 300);
   if (!q) return res.status(400).json({ error: "No query", results: [] });
 
   try {
