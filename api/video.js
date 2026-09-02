@@ -1,135 +1,281 @@
 // Neuron AI — /api/video
-// json2video.com — free tier (with watermark), no credit card needed
-// Get free key: json2video.com → Sign up → Dashboard → API Key
-// Add as JSON2VIDEO_KEY in Vercel environment variables
-const https = require("https");
-const { applyCors, handleOptions, cleanText } = require("./_security.js");
+// Creates a video using JSON2Video
 
-function httpReq(url, method, body, headers) {
+const https = require("https");
+const {
+  applyCors,
+  handleOptions,
+  cleanText
+} = require("./_security.js");
+
+function httpRequest(url, method, body, headers = {}) {
   return new Promise((resolve, reject) => {
-    const u = new URL(url);
-    const d = body ? JSON.stringify(body) : null;
-    const req = https.request({
-      hostname: u.hostname, path: u.pathname + u.search, method,
-      headers: { "Content-Type": "application/json", ...(d ? { "Content-Length": Buffer.byteLength(d) } : {}), ...headers }
-    }, res => {
-      let raw = "";
-      res.on("data", c => raw += c);
-      res.on("end", () => { try { resolve({ status: res.statusCode, data: JSON.parse(raw) }); } catch { resolve({ status: res.statusCode, data: raw }); } });
+    const parsedUrl = new URL(url);
+    const data = body ? JSON.stringify(body) : null;
+
+    const request = https.request(
+      {
+        hostname: parsedUrl.hostname,
+        path: parsedUrl.pathname + parsedUrl.search,
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          ...headers,
+          ...(data
+            ? {
+                "Content-Length": Buffer.byteLength(data)
+              }
+            : {})
+        }
+      },
+      response => {
+        let raw = "";
+
+        response.on("data", chunk => {
+          raw += chunk;
+        });
+
+        response.on("end", () => {
+          try {
+            resolve({
+              status: response.statusCode,
+              data: JSON.parse(raw)
+            });
+          } catch {
+            resolve({
+              status: response.statusCode,
+              data: raw
+            });
+          }
+        });
+      }
+    );
+
+    request.on("error", reject);
+
+    request.setTimeout(120000, () => {
+      request.destroy(new Error("Video request timed out"));
     });
-    req.on("error", reject);
-    req.setTimeout(120000, () => req.destroy(new Error("Timeout")));
-    if (d) req.write(d);
-    req.end();
+
+    if (data) {
+      request.write(data);
+    }
+
+    request.end();
   });
 }
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function sleep(milliseconds) {
+  return new Promise(resolve => {
+    setTimeout(resolve, milliseconds);
+  });
+}
 
 module.exports = async function handler(req, res) {
   applyCors(req, res, "POST, OPTIONS");
-  if (handleOptions(req, res)) return;
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const body = req.body || {};
-  const storyboard = cleanText(body.storyboard, 24000);
-  const title = cleanText(body.title, 200) || "Neuron AI Video";
+  if (handleOptions(req, res)) {
+    return;
+  }
 
-  if (!storyboard) return res.status(400).json({ error: "No storyboard provided" });
-
-  const key = process.env.JSON2VIDEO_KEY;
-  if (!key) {
-    return res.status(500).json({
-      error: "No json2video key configured",
-      fix: "Get a free key at json2video.com → Sign up → Add as JSON2VIDEO_KEY in Vercel"
+  if (req.method !== "POST") {
+    return res.status(405).json({
+      error: "Method not allowed"
     });
   }
 
-  // Parse the storyboard into scenes
-  // Storyboard format: SCENE N — Xs\nVisual: ...\nAudio: ...
-  const sceneMatches = storyboard.match(/SCENE\s+\d+[^\n]*\n([\s\S]*?)(?=SCENE\s+\d+|$)/gi) || [];
+  const body = req.body || {};
 
-  const scenes = sceneMatches.slice(0, 6).map((block, i) => {
-    const lines = block.split('\n').filter(l => l.trim());
-    const visual = lines.find(l => l.startsWith('Visual:'))?.replace('Visual:', '').trim() || `Scene ${i + 1}`;
-    const audio = lines.find(l => l.startsWith('Audio:'))?.replace('Audio:', '').trim() || '';
+  const storyboard = cleanText(body.storyboard, 24000);
+  const title =
+    cleanText(body.title, 200) || "Neuron AI Video";
+
+  if (!storyboard) {
+    return res.status(400).json({
+      error: "No storyboard provided"
+    });
+  }
+
+  const apiKey = process.env.JSON2VIDEO_KEY;
+
+  if (!apiKey) {
+    return res.status(503).json({
+      error: "No JSON2Video key configured",
+      fix:
+        "Add JSON2VIDEO_KEY to your Vercel environment variables"
+    });
+  }
+
+  // Expected storyboard format:
+  //
+  // SCENE 1 — 5s
+  // Visual: ...
+  // Audio: ...
+  //
+  const sceneMatches =
+    storyboard.match(
+      /SCENE\s+(?:\[\s*)?\d+(?:\s*\])?[^\n]*\n([\s\S]*?)(?=SCENE\s+(?:\[\s*)?\d+(?:\s*\])?|$)/gi
+    ) || [];
+
+  const scenes = sceneMatches.slice(0, 6).map((block, index) => {
+    const lines = block
+      .split("\n")
+      .map(line => line.trim())
+      .filter(Boolean);
+
+    const visualLine = lines.find(line =>
+      /^Visual:/i.test(line)
+    );
+
+    const audioLine = lines.find(line =>
+      /^Audio:/i.test(line)
+    );
+
+    const visual = visualLine
+      ? visualLine.replace(/^Visual:/i, "").trim()
+      : `Scene ${index + 1}`;
+
+    const audio = audioLine
+      ? audioLine.replace(/^Audio:/i, "").trim()
+      : "";
+
+    const elements = [
+      {
+        type: "text",
+        text: visual.slice(0, 100),
+        style: "002",
+        duration: 5,
+        position: "center-bottom"
+      }
+    ];
+
+    if (audio && audio.toLowerCase() !== "none") {
+      elements.push({
+        type: "text",
+        text: "Audio: " + audio.slice(0, 80),
+        style: "002",
+        duration: 5,
+        position: "bottom"
+      });
+    }
 
     return {
-      comment: `Scene ${i + 1}`,
+      comment: `Scene ${index + 1}`,
       duration: 5,
-      elements: [
-        {
-          type: "text",
-          text: visual.slice(0, 100),
-          style: "002",
-          duration: 5,
-          position: "center-bottom"
-        },
-        ...(audio ? [{
-          type: "text",
-          text: "🎵 " + audio.slice(0, 80),
-          style: "002",
-          duration: 5,
-          position: "bottom"
-        }] : [])
-      ]
+      elements
     };
   });
 
-  // If no scenes parsed, make a simple title card
+  // If the AI format could not be parsed, create a title card.
   if (!scenes.length) {
     scenes.push({
       comment: "Title",
       duration: 5,
-      elements: [{ type: "text", text: title, style: "005", duration: 5, position: "center" }]
+      elements: [
+        {
+          type: "text",
+          text: title,
+          style: "005",
+          duration: 5,
+          position: "center"
+        }
+      ]
     });
   }
 
   try {
-    // Create the video
-    const createRes = await httpReq(
+    const createResponse = await httpRequest(
       "https://api.json2video.com/v2/movies",
       "POST",
-      { resolution: "full-hd", quality: "high", scenes },
-      { "x-api-key": key }
+      {
+        resolution: "full-hd",
+        quality: "high",
+        scenes
+      },
+      {
+        "x-api-key": apiKey
+      }
     );
 
-    if (createRes.status !== 200 && createRes.status !== 201) {
-      throw new Error("Video creation failed: " + JSON.stringify(createRes.data).slice(0, 200));
+    if (
+      createResponse.status !== 200 &&
+      createResponse.status !== 201
+    ) {
+      throw new Error(
+        "Video creation failed: " +
+          JSON.stringify(createResponse.data).slice(0, 300)
+      );
     }
 
-    const movieId = createRes.data?.movie;
-    if (!movieId) throw new Error("No movie ID returned: " + JSON.stringify(createRes.data));
+    // JSON2Video returns `project`, not always `movie`.
+    const projectId =
+      createResponse.data?.project ||
+      createResponse.data?.movie;
 
-    // Poll for completion (json2video renders asynchronously)
+    if (!projectId) {
+      throw new Error(
+        "No video project ID returned: " +
+          JSON.stringify(createResponse.data)
+      );
+    }
+
+    // Wait for the video to finish rendering.
     for (let attempt = 0; attempt < 20; attempt++) {
       await sleep(6000);
-      const pollRes = await httpReq(
-        `https://api.json2video.com/v2/movies?project=${movieId}`,
-        "GET", null,
-        { "x-api-key": key }
+
+      const pollResponse = await httpRequest(
+        "https://api.json2video.com/v2/movies?project=" +
+          encodeURIComponent(projectId),
+        "GET",
+        null,
+        {
+          "x-api-key": apiKey
+        }
       );
 
-      if (pollRes.status === 200) {
-        const movie = Array.isArray(pollRes.data?.movies) ? pollRes.data.movies[0] : pollRes.data;
-        const status = movie?.status;
+      if (pollResponse.status !== 200) {
+        continue;
+      }
 
-        if (status === "done") {
-          const videoUrl = movie?.url || movie?.movie_url;
-          if (videoUrl) {
-            return res.status(200).json({ videoUrl, movieId, provider: "json2video" });
-          }
+      const movie = Array.isArray(
+        pollResponse.data?.movies
+      )
+        ? pollResponse.data.movies[0]
+        : pollResponse.data;
+
+      const status = movie?.status;
+
+      if (status === "done") {
+        const videoUrl =
+          movie?.url ||
+          movie?.movie_url ||
+          movie?.video_url;
+
+        if (videoUrl) {
+          return res.status(200).json({
+            videoUrl,
+            projectId,
+            provider: "json2video"
+          });
         }
-        if (status === "error") {
-          throw new Error("Video render failed: " + (movie?.error || "unknown error"));
-        }
+      }
+
+      if (status === "error") {
+        throw new Error(
+          "Video render failed: " +
+            (movie?.error || "unknown error")
+        );
       }
     }
 
-    throw new Error("Render timed out — json2video may be busy. Try again in a moment.");
+    throw new Error(
+      "Video render timed out. Try again later."
+    );
+  } catch (error) {
+    console.error("Video error:", error.message);
 
-  } catch (e) {
-    console.error("Video error:", e.message);
-    return res.status(502).json({ error: e.message });
+    return res.status(502).json({
+      error: error.message
+    });
   }
 };
