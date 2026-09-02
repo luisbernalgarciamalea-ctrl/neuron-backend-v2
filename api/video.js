@@ -1,5 +1,5 @@
 // Neuron AI — /api/video
-// Creates a video using JSON2Video
+// Creates an asynchronous JSON2Video render job.
 
 const https = require("https");
 const {
@@ -53,8 +53,10 @@ function httpRequest(url, method, body, headers = {}) {
 
     request.on("error", reject);
 
-    request.setTimeout(120000, () => {
-      request.destroy(new Error("Video request timed out"));
+    request.setTimeout(30000, () => {
+      request.destroy(
+        new Error("Video provider request timed out")
+      );
     });
 
     if (data) {
@@ -62,12 +64,6 @@ function httpRequest(url, method, body, headers = {}) {
     }
 
     request.end();
-  });
-}
-
-function sleep(milliseconds) {
-  return new Promise(resolve => {
-    setTimeout(resolve, milliseconds);
   });
 }
 
@@ -86,9 +82,14 @@ module.exports = async function handler(req, res) {
 
   const body = req.body || {};
 
-  const storyboard = cleanText(body.storyboard, 24000);
+  const storyboard = cleanText(
+    body.storyboard,
+    24000
+  );
+
   const title =
-    cleanText(body.title, 200) || "Neuron AI Video";
+    cleanText(body.title, 200) ||
+    "Neuron AI Video";
 
   if (!storyboard) {
     return res.status(400).json({
@@ -106,67 +107,62 @@ module.exports = async function handler(req, res) {
     });
   }
 
-  // Expected storyboard format:
-  //
-  // SCENE 1 — 5s
-  // Visual: ...
-  // Audio: ...
-  //
   const sceneMatches =
     storyboard.match(
       /SCENE\s+(?:\[\s*)?\d+(?:\s*\])?[^\n]*\n([\s\S]*?)(?=SCENE\s+(?:\[\s*)?\d+(?:\s*\])?|$)/gi
     ) || [];
 
-  const scenes = sceneMatches.slice(0, 6).map((block, index) => {
-    const lines = block
-      .split("\n")
-      .map(line => line.trim())
-      .filter(Boolean);
+  const scenes = sceneMatches
+    .slice(0, 6)
+    .map((block, index) => {
+      const lines = block
+        .split("\n")
+        .map(line => line.trim())
+        .filter(Boolean);
 
-    const visualLine = lines.find(line =>
-      /^Visual:/i.test(line)
-    );
+      const visualLine = lines.find(line =>
+        /^Visual:/i.test(line)
+      );
 
-    const audioLine = lines.find(line =>
-      /^Audio:/i.test(line)
-    );
+      const audioLine = lines.find(line =>
+        /^Audio:/i.test(line)
+      );
 
-    const visual = visualLine
-      ? visualLine.replace(/^Visual:/i, "").trim()
-      : `Scene ${index + 1}`;
+      const visual = visualLine
+        ? visualLine.replace(/^Visual:/i, "").trim()
+        : `Scene ${index + 1}`;
 
-    const audio = audioLine
-      ? audioLine.replace(/^Audio:/i, "").trim()
-      : "";
+      const audio = audioLine
+        ? audioLine.replace(/^Audio:/i, "").trim()
+        : "";
 
-    const elements = [
-      {
-        type: "text",
-        text: visual.slice(0, 100),
-        style: "002",
-        duration: 5,
-        position: "center-bottom"
+      const elements = [
+        {
+          type: "text",
+          text: visual.slice(0, 100),
+          style: "002",
+          duration: 5,
+          position: "center-bottom"
+        }
+      ];
+
+      if (audio && audio.toLowerCase() !== "none") {
+        elements.push({
+          type: "text",
+          text: "Audio: " + audio.slice(0, 80),
+          style: "002",
+          duration: 5,
+          position: "bottom"
+        });
       }
-    ];
 
-    if (audio && audio.toLowerCase() !== "none") {
-      elements.push({
-        type: "text",
-        text: "Audio: " + audio.slice(0, 80),
-        style: "002",
+      return {
+        comment: `Scene ${index + 1}`,
         duration: 5,
-        position: "bottom"
-      });
-    }
+        elements
+      };
+    });
 
-    return {
-      comment: `Scene ${index + 1}`,
-      duration: 5,
-      elements
-    };
-  });
-
-  // If the AI format could not be parsed, create a title card.
   if (!scenes.length) {
     scenes.push({
       comment: "Title",
@@ -207,7 +203,7 @@ module.exports = async function handler(req, res) {
       );
     }
 
-    // JSON2Video returns `project`, not always `movie`.
+    // JSON2Video returns "project".
     const projectId =
       createResponse.data?.project ||
       createResponse.data?.movie;
@@ -219,58 +215,14 @@ module.exports = async function handler(req, res) {
       );
     }
 
-    // Wait for the video to finish rendering.
-    for (let attempt = 0; attempt < 20; attempt++) {
-      await sleep(6000);
-
-      const pollResponse = await httpRequest(
-        "https://api.json2video.com/v2/movies?project=" +
-          encodeURIComponent(projectId),
-        "GET",
-        null,
-        {
-          "x-api-key": apiKey
-        }
-      );
-
-      if (pollResponse.status !== 200) {
-        continue;
-      }
-
-      const movie = Array.isArray(
-        pollResponse.data?.movies
-      )
-        ? pollResponse.data.movies[0]
-        : pollResponse.data;
-
-      const status = movie?.status;
-
-      if (status === "done") {
-        const videoUrl =
-          movie?.url ||
-          movie?.movie_url ||
-          movie?.video_url;
-
-        if (videoUrl) {
-          return res.status(200).json({
-            videoUrl,
-            projectId,
-            provider: "json2video"
-          });
-        }
-      }
-
-      if (status === "error") {
-        throw new Error(
-          "Video render failed: " +
-            (movie?.error || "unknown error")
-        );
-      }
-    }
-
-    throw new Error(
-      "Video render timed out. Try again later."
-    );
+    // Return immediately. Do not wait inside Vercel,
+    // otherwise the function times out.
+    return res.status(202).json({
+      status: "processing",
+      projectId,
+      provider: "json2video",
+      message: "Video render started"
+    });
   } catch (error) {
     console.error("Video error:", error.message);
 
