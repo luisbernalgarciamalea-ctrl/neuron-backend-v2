@@ -11,7 +11,10 @@
       "maxDuration": 60
     },
     "api/video.js": {
-      "maxDuration": 120
+      "maxDuration": 60
+    },
+    "api/video-status.js": {
+      "maxDuration": 10
     },
     "api/search.js": {
       "maxDuration": 10
