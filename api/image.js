@@ -1,5 +1,5 @@
 // Neuron AI — /api/image
-// Gemini image generation with a free fallback when Gemini is rate-limited
+// Gemini image generation with model fallback chain
 
 const https = require("https");
 const {
@@ -36,6 +36,9 @@ function nextKey(keys) {
 }
 
 function fallbackImageUrl(prompt) {
+  // Pollinations requires a safe 32-bit seed.
+  const seed = Math.floor(Math.random() * 2147483647);
+
   return (
     "https://image.pollinations.ai/prompt/" +
     encodeURIComponent(
@@ -47,7 +50,7 @@ function fallbackImageUrl(prompt) {
     "&nologo=true" +
     "&enhance=true" +
     "&seed=" +
-    Date.now()
+    seed
   );
 }
 
@@ -187,7 +190,6 @@ module.exports = async function handler(req, res) {
             return res.status(200).json({
               imageUrl: dataUrl,
               isDataUrl: true,
-              provider: "Gemini",
               model
             });
           }
@@ -208,14 +210,14 @@ module.exports = async function handler(req, res) {
         }
 
         if (result.status === 429) {
-          lastError = new Error("Gemini rate limit");
+          lastError = new Error("Rate limit");
           break;
         }
 
         const message = (
           result.data?.error?.message ||
           JSON.stringify(result.data)
-        ).slice(0, 200);
+        ).slice(0, 150);
 
         lastError = new Error(
           model +
@@ -231,7 +233,7 @@ module.exports = async function handler(req, res) {
   }
 
   // Gemini failed or was rate-limited.
-  // Return a fallback image instead of returning an error.
+  // Return a fallback image instead of an error.
   return res.status(200).json({
     imageUrl: fallbackImageUrl(prompt),
     provider: "free image fallback",
