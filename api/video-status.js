@@ -57,9 +57,7 @@ function httpGet(url, headers = {}) {
 module.exports = async function handler(req, res) {
   applyCors(req, res, "GET, OPTIONS");
 
-  if (handleOptions(req, res)) {
-    return;
-  }
+  if (handleOptions(req, res)) return;
 
   if (req.method !== "GET") {
     return res.status(405).json({
@@ -103,44 +101,68 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    const movie = Array.isArray(
-      result.data?.movies
-    )
-      ? result.data.movies[0]
-      : result.data;
+    // JSON2Video returns:
+    // { success: true, movie: { status, url, message } }
+    const movie =
+      result.data?.movie ||
+      (
+        Array.isArray(result.data?.movies)
+          ? result.data.movies[0]
+          : result.data
+      );
 
-    const status = String(
+    const providerStatus = String(
       movie?.status || "processing"
     ).toLowerCase();
 
-    if (status === "done") {
-      const videoUrl =
-        movie?.url ||
-        movie?.movie_url ||
-        movie?.video_url;
+    const normalizedStatus =
+      providerStatus === "completed"
+        ? "done"
+        : providerStatus === "failed"
+          ? "error"
+          : providerStatus;
 
-      if (videoUrl) {
-        return res.status(200).json({
-          status: "done",
-          projectId,
-          videoUrl,
-          provider: "json2video"
-        });
-      }
+    const videoUrl =
+      movie?.url ||
+      movie?.movie_url ||
+      movie?.video_url ||
+      null;
+
+    if (normalizedStatus === "done" && videoUrl) {
+      return res.status(200).json({
+        status: "done",
+        projectId,
+        videoUrl,
+        provider: "json2video"
+      });
     }
 
-    if (status === "error") {
+    if (normalizedStatus === "done" && !videoUrl) {
       return res.status(200).json({
         status: "error",
         projectId,
         error:
+          "JSON2Video marked the render done but returned no video URL"
+      });
+    }
+
+    if (
+      ["error", "timeout", "failed"].includes(
+        normalizedStatus
+      )
+    ) {
+      return res.status(200).json({
+        status: "error",
+        projectId,
+        error:
+          movie?.message ||
           movie?.error ||
           "Video render failed"
       });
     }
 
     return res.status(200).json({
-      status: status || "processing",
+      status: normalizedStatus || "processing",
       projectId
     });
   } catch (error) {
