@@ -3,25 +3,57 @@ const https = require("https");
 const crypto = require("crypto");
 const { applyCors, handleOptions } = require("./_security.js");
 
-// Simple MongoDB REST via Data API (no driver needed in serverless)
-// Uses MongoDB Atlas Data API
+// MongoDB configuration
 const MONGO_URI = process.env.MONGO_URI || "";
 const DB_NAME = "neuron";
 const COLLECTION = "users";
 
 function hashPassword(pw) {
-  return crypto.createHash("sha256").update(pw + "neuron_2024_salt").digest("hex");
+  return crypto
+    .createHash("sha256")
+    .update(pw + "neuron_2024_salt")
+    .digest("hex");
 }
 
-// Make a request to MongoDB Atlas Data API
-// OR: fall back to direct driver if MONGO_DATA_API not set
+// Developer access is server-side only.
+// The actual code must be stored in Vercel as DEV_PREMIUM_CODE.
+const DEV_PREMIUM_CODE = String(
+  process.env.DEV_PREMIUM_CODE || ""
+).trim();
+
+function validDeveloperCode(input) {
+  const supplied = String(input || "").trim().slice(0, 128);
+
+  if (
+    !DEV_PREMIUM_CODE ||
+    !supplied ||
+    supplied.length !== DEV_PREMIUM_CODE.length
+  ) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(
+    Buffer.from(supplied),
+    Buffer.from(DEV_PREMIUM_CODE)
+  );
+}
+
+function publicUser(user) {
+  return {
+    name: user.name,
+    email: user.email,
+    plan: user.plan || "Free",
+    isDeveloper: Boolean(user.isDeveloper)
+  };
+}
+
+// Optional MongoDB Atlas Data API helper
 function mongoRequest(action, body) {
   return new Promise((resolve, reject) => {
-    const dataApiUrl = process.env.MONGO_DATA_API_URL; // optional Atlas Data API
+    const dataApiUrl = process.env.MONGO_DATA_API_URL;
     const dataApiKey = process.env.MONGO_DATA_API_KEY;
 
     if (!dataApiUrl || !dataApiKey) {
-      // Fall back to native driver approach via dynamic import
       resolve(null);
       return;
     }
@@ -34,6 +66,7 @@ function mongoRequest(action, body) {
     });
 
     const url = new URL(dataApiUrl + "/action/" + action);
+
     const options = {
       hostname: url.hostname,
       path: url.pathname + url.search,
@@ -45,82 +78,212 @@ function mongoRequest(action, body) {
       }
     };
 
-    const req = https.request(options, (res) => {
+    const request = https.request(options, response => {
       let raw = "";
-      res.on("data", c => raw += c);
-      res.on("end", () => {
-        try { resolve(JSON.parse(raw)); }
-        catch { resolve({ error: raw }); }
+
+      response.on("data", chunk => {
+        raw += chunk;
+      });
+
+      response.on("end", () => {
+        try {
+          resolve(JSON.parse(raw));
+        } catch {
+          resolve({ error: raw });
+        }
       });
     });
-    req.on("error", reject);
-    req.setTimeout(10000, () => req.destroy(new Error("Timeout")));
-    req.write(payload);
-    req.end();
+
+    request.on("error", reject);
+
+    request.setTimeout(10000, () => {
+      request.destroy(new Error("MongoDB Data API timeout"));
+    });
+
+    request.write(payload);
+    request.end();
   });
 }
 
-// Native MongoDB driver (works in Vercel if mongodb is in package.json)
-let _client = null;
+// Native MongoDB driver
+let mongoClient = null;
+
 async function getCollection() {
-  if (!MONGO_URI) throw new Error("MONGO_URI not set");
-  if (!_client) {
-    const { MongoClient } = require("mongodb");
-    _client = new MongoClient(MONGO_URI);
-    await _client.connect();
+  if (!MONGO_URI) {
+    throw new Error("MONGO_URI not set");
   }
-  return _client.db(DB_NAME).collection(COLLECTION);
+
+  if (!mongoClient) {
+    const { MongoClient } = require("mongodb");
+
+    mongoClient = new MongoClient(MONGO_URI);
+    await mongoClient.connect();
+  }
+
+  return mongoClient.db(DB_NAME).collection(COLLECTION);
 }
 
 module.exports = async function handler(req, res) {
   applyCors(req, res, "POST, OPTIONS");
-  if (handleOptions(req, res)) return;
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { action, name, email, password, plan } = req.body || {};
-  if (!email || !password) return res.status(400).json({ error: "Email and password required" });
+  if (handleOptions(req, res)) {
+    return;
+  }
 
-  const normalEmail = email.trim().toLowerCase();
-  const hashedPw = hashPassword(password);
+  if (req.method !== "POST") {
+    return res.status(405).json({
+      error: "Method not allowed"
+    });
+  }
+
+  const {
+    action,
+    name,
+    email,
+    password,
+    developerCode
+  } = req.body || {};
+
+  if (!email || !password) {
+    return res.status(400).json({
+      error: "Email and password required"
+    });
+  }
+
+  const normalEmail = String(email).trim().toLowerCase();
+  const hashedPassword = hashPassword(String(password));
 
   try {
-    const col = await getCollection();
+    const collection = await getCollection();
 
+    // Register a new user
     if (action === "register") {
-      if (!name) return res.status(400).json({ error: "Name required" });
+      if (!name) {
+        return res.status(400).json({
+          error: "Name required"
+        });
+      }
 
-      const existing = await col.findOne({ email: normalEmail });
-      if (existing) return res.status(409).json({ error: "An account with this email already exists. Please log in." });
+      const existingUser = await collection.findOne({
+        email: normalEmail
+      });
+
+      if (existingUser) {
+        return res.status(409).json({
+          error: "An account with this email already exists. Please log in."
+        });
+      }
+
+      const developerAccess = validDeveloperCode(developerCode);
+
+      if (developerCode && !developerAccess) {
+        return res.status(401).json({
+          error: "Invalid developer code."
+        });
+      }
+
+      const now = new Date().toISOString();
 
       const user = {
-        name: name.trim(),
+        name: String(name).trim(),
         email: normalEmail,
-        password: hashedPw,
-        plan: plan || "Free",
-        isDeveloper: plan === "Premium",
-        createdAt: new Date().toISOString()
+        password: hashedPassword,
+        plan: developerAccess ? "Premium" : "Free",
+        isDeveloper: developerAccess,
+        createdAt: now
       };
 
-      await col.insertOne(user);
-      return res.status(200).json({ success: true, user: { name: user.name, email: user.email, plan: user.plan, isDeveloper: user.isDeveloper } });
+      if (developerAccess) {
+        user.developerActivatedAt = now;
+      }
+
+      await collection.insertOne(user);
+
+      return res.status(200).json({
+        success: true,
+        user: publicUser(user)
+      });
     }
 
+    // Log in
     if (action === "login") {
-      const user = await col.findOne({ email: normalEmail, password: hashedPw });
-      if (!user) return res.status(401).json({ error: "Invalid email or password." });
-      return res.status(200).json({ success: true, user: { name: user.name, email: user.email, plan: user.plan, isDeveloper: user.isDeveloper } });
+      const user = await collection.findOne({
+        email: normalEmail,
+        password: hashedPassword
+      });
+
+      if (!user) {
+        return res.status(401).json({
+          error: "Invalid email or password."
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        user: publicUser(user)
+      });
     }
 
+    // Activate developer Premium access for an existing account
+    if (action === "activateDeveloper") {
+      const user = await collection.findOne({
+        email: normalEmail,
+        password: hashedPassword
+      });
+
+      if (!user) {
+        return res.status(401).json({
+          error: "Invalid email or password."
+        });
+      }
+
+      if (!validDeveloperCode(developerCode)) {
+        return res.status(401).json({
+          error: "Invalid developer code."
+        });
+      }
+
+      const activatedAt = new Date().toISOString();
+
+      await collection.updateOne(
+        {
+          email: normalEmail
+        },
+        {
+          $set: {
+            plan: "Premium",
+            isDeveloper: true,
+            developerActivatedAt: activatedAt
+          }
+        }
+      );
+
+      return res.status(200).json({
+        success: true,
+        user: publicUser({
+          ...user,
+          plan: "Premium",
+          isDeveloper: true
+        })
+      });
+    }
+
+    // Do not allow the browser to change plans directly
     if (action === "updatePlan") {
-      await col.updateOne({ email: normalEmail }, { $set: { plan, isDeveloper: plan === "Premium" } });
-      return res.status(200).json({ success: true });
+      return res.status(403).json({
+        error: "Plan changes are managed by the server."
+      });
     }
 
-    return res.status(400).json({ error: "Unknown action" });
+    return res.status(400).json({
+      error: "Unknown action"
+    });
+  } catch (error) {
+    console.error("Auth error:", error.message);
 
-  } catch (err) {
-    console.error("Auth error:", err.message);
-    // Fallback: local-only mode if DB unavailable
-    return res.status(503).json({ error: "Database unavailable: " + err.message, fallback: true });
+    return res.status(503).json({
+      error: "Database unavailable: " + error.message,
+      fallback: true
+    });
   }
 };
