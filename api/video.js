@@ -1,5 +1,5 @@
 // Neuron AI — /api/video
-// Creates an asynchronous JSON2Video render job.
+// Creates an asynchronous JSON2Video render job with AI-generated scene images.
 
 const https = require("https");
 const {
@@ -22,9 +22,7 @@ function httpRequest(url, method, body, headers = {}) {
           "Content-Type": "application/json",
           ...headers,
           ...(data
-            ? {
-                "Content-Length": Buffer.byteLength(data)
-              }
+            ? { "Content-Length": Buffer.byteLength(data) }
             : {})
         }
       },
@@ -59,20 +57,124 @@ function httpRequest(url, method, body, headers = {}) {
       );
     });
 
-    if (data) {
-      request.write(data);
-    }
-
+    if (data) request.write(data);
     request.end();
   });
+}
+
+function sceneDuration(header) {
+  const match = String(header || "").match(
+    /(\d+(?:\.\d+)?)\s*s\b/i
+  );
+
+  const seconds = match ? Number(match[1]) : 5;
+
+  return Math.max(
+    3,
+    Math.min(
+      20,
+      Number.isFinite(seconds) ? seconds : 5
+    )
+  );
+}
+
+function labelledLine(lines, label) {
+  const line = lines.find(item =>
+    new RegExp("^" + label + ":", "i").test(item)
+  );
+
+  return line
+    ? line
+        .replace(
+          new RegExp("^" + label + ":", "i"),
+          ""
+        )
+        .trim()
+    : "";
+}
+
+function buildScene(block, index) {
+  const lines = block
+    .split("\n")
+    .map(line => line.trim())
+    .filter(Boolean);
+
+  const header = lines[0] || "";
+  const visual = labelledLine(lines, "Visual");
+  const action = labelledLine(lines, "Action");
+  const mood = labelledLine(lines, "Mood");
+  const audio = labelledLine(lines, "Audio");
+
+  const duration = sceneDuration(header);
+
+  const fallbackDescription = lines
+    .filter(line =>
+      !/^(Shot|Visual|Audio|Action|Mood):/i.test(line)
+    )
+    .join(" ");
+
+  const prompt = [
+    visual,
+    action,
+    mood,
+    fallbackDescription
+  ]
+    .filter(Boolean)
+    .join(". ")
+    .slice(0, 900) ||
+    `Cinematic scene ${index + 1} for a Neuron AI video`;
+
+  const elements = [
+    {
+      type: "image",
+      model: "flux-schnell",
+      prompt:
+        `${prompt}. Cinematic, professional, high detail, ` +
+        `coherent composition, no text or logos.`,
+      "aspect-ratio": "horizontal",
+      resize: "fill",
+      duration,
+      zoom: 2,
+      pan: index % 2 ? "left" : "right"
+    },
+    {
+      type: "text",
+      text: `Scene ${index + 1}`,
+      style: "002",
+      duration,
+      position: "top-left",
+      x: 50,
+      y: 40
+    }
+  ];
+
+  if (audio && audio.toLowerCase() !== "none") {
+    elements.push({
+      type: "text",
+      text: audio.slice(0, 90),
+      style: "002",
+      duration,
+      position: "bottom-left",
+      x: 50,
+      y: -45
+    });
+  }
+
+  return {
+    comment: `Scene ${index + 1}`,
+    duration,
+    transition: {
+      style: "fade",
+      duration: 0.5
+    },
+    elements
+  };
 }
 
 module.exports = async function handler(req, res) {
   applyCors(req, res, "POST, OPTIONS");
 
-  if (handleOptions(req, res)) {
-    return;
-  }
+  if (handleOptions(req, res)) return;
 
   if (req.method !== "POST") {
     return res.status(405).json({
@@ -81,15 +183,14 @@ module.exports = async function handler(req, res) {
   }
 
   const body = req.body || {};
-
   const storyboard = cleanText(
     body.storyboard,
     24000
   );
-
-  const title =
-    cleanText(body.title, 200) ||
-    "Neuron AI Video";
+  const title = cleanText(
+    body.title,
+    200
+  ) || "Neuron AI Video";
 
   if (!storyboard) {
     return res.status(400).json({
@@ -107,76 +208,23 @@ module.exports = async function handler(req, res) {
     });
   }
 
-  const sceneMatches =
-    storyboard.match(
-      /SCENE\s+(?:\[\s*)?\d+(?:\s*\])?[^\n]*\n([\s\S]*?)(?=SCENE\s+(?:\[\s*)?\d+(?:\s*\])?|$)/gi
-    ) || [];
+  const sceneMatches = storyboard.match(
+    /SCENE\s+(?:\[\s*)?\d+(?:\s*\])?[^\n]*\n([\s\S]*?)(?=SCENE\s+(?:\[\s*)?\d+(?:\s*\])?|$)/gi
+  ) || [];
 
   const scenes = sceneMatches
-    .slice(0, 6)
-    .map((block, index) => {
-      const lines = block
-        .split("\n")
-        .map(line => line.trim())
-        .filter(Boolean);
-
-      const visualLine = lines.find(line =>
-        /^Visual:/i.test(line)
-      );
-
-      const audioLine = lines.find(line =>
-        /^Audio:/i.test(line)
-      );
-
-      const visual = visualLine
-        ? visualLine.replace(/^Visual:/i, "").trim()
-        : `Scene ${index + 1}`;
-
-      const audio = audioLine
-        ? audioLine.replace(/^Audio:/i, "").trim()
-        : "";
-
-      const elements = [
-        {
-          type: "text",
-          text: visual.slice(0, 100),
-          style: "002",
-          duration: 5,
-          position: "center-bottom"
-        }
-      ];
-
-      if (audio && audio.toLowerCase() !== "none") {
-        elements.push({
-          type: "text",
-          text: "Audio: " + audio.slice(0, 80),
-          style: "002",
-          duration: 5,
-          position: "bottom"
-        });
-      }
-
-      return {
-        comment: `Scene ${index + 1}`,
-        duration: 5,
-        elements
-      };
-    });
+    .slice(0, 8)
+    .map((block, index) =>
+      buildScene(block, index)
+    );
 
   if (!scenes.length) {
-    scenes.push({
-      comment: "Title",
-      duration: 5,
-      elements: [
-        {
-          type: "text",
-          text: title,
-          style: "005",
-          duration: 5,
-          position: "center"
-        }
-      ]
-    });
+    scenes.push(
+      buildScene(
+        `SCENE 1 — 5s\nVisual: A cinematic opening shot inspired by ${title}`,
+        0
+      )
+    );
   }
 
   try {
@@ -199,24 +247,21 @@ module.exports = async function handler(req, res) {
     ) {
       throw new Error(
         "Video creation failed: " +
-          JSON.stringify(createResponse.data).slice(0, 300)
+          JSON.stringify(createResponse.data).slice(0, 400)
       );
     }
 
-    // JSON2Video returns "project".
     const projectId =
       createResponse.data?.project ||
-      createResponse.data?.movie;
+      createResponse.data?.movie?.project;
 
     if (!projectId) {
       throw new Error(
         "No video project ID returned: " +
-          JSON.stringify(createResponse.data)
+          JSON.stringify(createResponse.data).slice(0, 400)
       );
     }
 
-    // Return immediately. Do not wait inside Vercel,
-    // otherwise the function times out.
     return res.status(202).json({
       status: "processing",
       projectId,
