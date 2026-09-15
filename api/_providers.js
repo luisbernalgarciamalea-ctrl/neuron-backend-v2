@@ -85,7 +85,7 @@ async function chat({ system, messages, provider = 'auto', files = [], maxTokens
     return { reply, content: reply, provider: selected, model, truncated: candidate.finishReason === 'MAX_TOKENS' };
   }
   const isGroq = selected === 'groq';
-  const model = isGroq ? 'llama-3.3-70b-versatile' : 'openrouter/free';
+  const model = isGroq ? 'openai/gpt-oss-120b' : 'openrouter/free';
   const data = await request(isGroq ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://openrouter.ai/api/v1/chat/completions', {
     model, messages: [{ role: 'system', content: system }, ...input], max_tokens: maxTokens, temperature: 0.7,
     ...(!isGroq ? { provider: { max_price: { prompt: 0, completion: 0 } } } : {})
