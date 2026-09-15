@@ -1,8 +1,0 @@
-{
-  "name": "neuron-backend-v2",
-  "version": "4.0.0",
-  "private": true,
-  "dependencies": {
-    "mongodb": "^6.16.0"
-  }
-}
