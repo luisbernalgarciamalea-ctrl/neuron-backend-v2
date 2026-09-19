@@ -1,5 +1,7 @@
 const { applyCors, handleOptions, cleanText, cleanHistory, cleanSearchResults }=require('./_security');
 const { chat, attachments }=require('./_providers');
+const { codingInstructions, workingFile }=require('./_coding');
+const { generateCode }=require('./_code-quality');
 function getSystemPrompt(mode, language, searchResults, isCreator) {
   const today = new Date().toLocaleDateString("en-US", {
     weekday: "long", year: "numeric", month: "long", day: "numeric"
@@ -50,6 +52,12 @@ module.exports=async function(req,res){
     const messages=payload.message ? [...cleanHistory(payload.history),{role:'user',content:cleanText(payload.message,24000)}] : cleanHistory(payload.messages);
     if(!messages.length)return res.status(400).json({error:'Enter a prompt or attach a file.'});
     const system=getSystemPrompt(mode,cleanText(payload.language,80),cleanSearchResults(payload.searchResults),false);
-    return res.status(200).json(await chat({system,messages,provider:payload.provider||'auto',files:attachments(payload.attachments),maxTokens:mode==='code'?8192:4096}));
+    const files=attachments(payload.attachments);
+    const current=mode==='code'?workingFile(payload.codeContext):null;
+    if(current)files.push(current);
+    // The full working file supersedes old code snippets without losing the user's requests.
+    const context=mode==='code'?messages.slice(-10).map(m=>current&&m.role==='assistant'?{...m,content:m.content.replace(/```[\s\S]*?(?:```|$)/g,'[Earlier code; use CURRENT_WORKING_FILE.]')}:m):messages;
+    const options={system:system+(mode==='code'?'\n\n'+codingInstructions:''),messages:context,provider:payload.provider||'auto',files,maxTokens:mode==='code'?16384:4096,allowFallback:payload.allowFallback!==false,coding:mode==='code'};
+    return res.status(200).json(mode==='code'?await generateCode(options,chat):await chat(options));
   }catch(error){return res.status(error.status||502).json({error:error.status?error.message:'Generation failed. Please retry.',code:error.code||'GENERATION_FAILED'});}
 };
